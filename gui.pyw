@@ -4,12 +4,8 @@ YouTube Downloader GUI - หน้าต่างสำหรับดาวน�
 เปิดด้วย gui.bat (หรือดับเบิลคลิกไฟล์นี้) - ต้องรัน setup.bat ก่อนครั้งแรก
 ใช้แค่ Python มาตรฐาน (tkinter) ไม่ต้องติดตั้งแพ็กเกจเพิ่ม
 """
-import json
 import os
 import queue
-import re
-import shutil
-import subprocess
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -17,122 +13,8 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 from tkinter.scrolledtext import ScrolledText
 
-ROOT = Path(__file__).resolve().parent
-BIN_DIR = ROOT / "bin"
-YTDLP = BIN_DIR / "yt-dlp.exe"
-FFMPEG = BIN_DIR / "ffmpeg.exe"
-CONFIG = ROOT / "yt-dlp.conf"
-SETTINGS_FILE = ROOT / "gui_settings.json"
-DEFAULT_OUT_DIR = ROOT / "downloads"
-
-# โหมดเดียวกับ download.ps1
-MODES = {
-    "best": "วิดีโอ คุณภาพสูงสุด (MP4)",
-    "1080": "วิดีโอ 1080p (MP4)",
-    "720": "วิดีโอ 720p (MP4)",
-    "mp3": "เสียงอย่างเดียว (MP3)",
-}
-
-# ให้ yt-dlp พิมพ์ progress เป็นบรรทัดที่แยกค่าได้ง่าย: __PROGRESS__<เปอร์เซ็นต์>|<ความเร็ว>|<เวลาที่เหลือ>|<ชื่อคลิป>
-PROGRESS_TAG = "__PROGRESS__"
-PROGRESS_TEMPLATE = (f"download:{PROGRESS_TAG}%(progress._percent_str)s|%(progress._speed_str)s"
-                     "|%(progress._eta_str)s|%(info.title)s")
-ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-PERCENT_RE = re.compile(r"([\d.]+)%")
-ITEM_RE = re.compile(r"^\[download\] Downloading item (\d+) of (\d+)")
-FORMATS_RE = re.compile(r"^\[info\] .+: Downloading \d+ format\(s\): (\S+)")
-STAGES = {
-    "[Merger]": "กำลังรวมภาพและเสียง...",
-    "[ExtractAudio]": "กำลังแปลงเป็น MP3...",
-    "[Metadata]": "กำลังใส่ข้อมูลไฟล์...",
-    "[EmbedThumbnail]": "กำลังใส่ภาพปก...",
-}
-NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-
-def format_args(mode):
-    if mode == "mp3":
-        return ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "0", "--embed-thumbnail"]
-    sort = "res,ext:mp4:m4a" if mode == "best" else f"res:{mode},ext:mp4:m4a"
-    return ["-f", "bv*+ba/b", "-S", sort, "--merge-output-format", "mp4"]
-
-
-def is_playlist_only(url):
-    """ลิงก์เพลย์ลิสต์ล้วน (ไม่ได้เจาะจงคลิป) - yt-dlp โหลดทั้งเพลย์ลิสต์เสมอ"""
-    return "/playlist" in url or ("list=" in url and "v=" not in url and "youtu.be/" not in url)
-
-
-def build_command(url, mode, out_dir, playlist):
-    playlist = playlist or is_playlist_only(url)
-    if playlist:
-        template = "%(playlist_title,playlist_id)s/%(playlist_index)03d - %(title)s [%(id)s].%(ext)s"
-    else:
-        template = "%(title)s [%(id)s].%(ext)s"
-
-    cmd = [
-        str(YTDLP),
-        "--ffmpeg-location", str(BIN_DIR),
-        "-P", str(out_dir),
-        "-o", template,
-        "--embed-metadata",
-        "--no-mtime",
-        "--encoding", "utf-8",
-        "--newline",
-        "--progress-template", PROGRESS_TEMPLATE,
-    ]
-    if not playlist:
-        cmd.append("--no-playlist")
-    # YouTube ต้องใช้ JavaScript runtime - ถ้ามี Node.js ในเครื่องก็ใช้ (Deno ใช้ได้อัตโนมัติอยู่แล้ว)
-    if shutil.which("node"):
-        cmd += ["--js-runtimes", "node"]
-    if CONFIG.exists():
-        cmd += ["--config-locations", str(CONFIG)]
-    return cmd + format_args(mode) + ["--", url]
-
-
-def load_settings():
-    try:
-        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-
-class Worker(threading.Thread):
-    """รันคำสั่ง yt-dlp ทีละคำสั่งในเธรดแยก แล้วส่งผลกลับให้หน้าจอผ่าน queue"""
-
-    def __init__(self, commands, events):
-        super().__init__(daemon=True)
-        self.commands = commands
-        self.events = events
-        self.proc = None
-        self.cancelled = False
-
-    def run(self):
-        failed = 0
-        for i, cmd in enumerate(self.commands, 1):
-            if self.cancelled:
-                break
-            self.events.put(("job", i, len(self.commands)))
-            try:
-                self.proc = subprocess.Popen(
-                    cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    encoding="utf-8", errors="replace", bufsize=1, creationflags=NO_WINDOW)
-            except OSError as e:
-                self.events.put(("line", f"ERROR: {e}"))
-                failed += 1
-                continue
-            for line in self.proc.stdout:
-                self.events.put(("line", ANSI_RE.sub("", line.rstrip())))
-            if self.proc.wait() != 0 and not self.cancelled:
-                failed += 1
-        self.events.put(("done", failed, self.cancelled))
-
-    def cancel(self):
-        self.cancelled = True
-        if self.proc and self.proc.poll() is None:
-            # /T ปิด ffmpeg ที่ yt-dlp เปิดไว้ด้วย
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)],
-                           capture_output=True, creationflags=NO_WINDOW)
+import ytcore
+from ytcore import MODES
 
 
 class App(tk.Tk):
@@ -142,15 +24,14 @@ class App(tk.Tk):
         self.events = queue.Queue()
         self.worker = None
         self.job_kind = None
+        self.tracker = ytcore.ProgressTracker()
 
-        settings = load_settings()
-        mode = settings.get("mode")
-        self.mode = tk.StringVar(value=mode if mode in MODES else "best")
-        self.playlist = tk.BooleanVar(value=bool(settings.get("playlist", False)))
-        self.out_dir = tk.StringVar(value=settings.get("out_dir") or str(DEFAULT_OUT_DIR))
+        settings = ytcore.load_settings()
+        self.mode = tk.StringVar(value=settings["mode"])
+        self.playlist = tk.BooleanVar(value=settings["playlist"])
+        self.out_dir = tk.StringVar(value=settings["out_dir"])
         self.status = tk.StringVar(value="พร้อมดาวน์โหลด")
         self.detail = tk.StringVar()
-        self._reset_position()
 
         self._setup_fonts()
         self._build_ui()
@@ -160,7 +41,7 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<Control-Return>", lambda e: self.start_download())
         self.after(100, self.poll_events)
-        if not YTDLP.exists():
+        if not ytcore.YTDLP.exists():
             self.after(300, self.ask_setup)
 
     # ---------- หน้าจอ ----------
@@ -271,7 +152,7 @@ class App(tk.Tk):
             self.out_dir.set(str(Path(folder)))
 
     def open_folder(self):
-        folder = Path(self.out_dir.get().strip() or DEFAULT_OUT_DIR)
+        folder = Path(self.out_dir.get().strip() or ytcore.DEFAULT_OUT_DIR)
         try:
             folder.mkdir(parents=True, exist_ok=True)
             os.startfile(folder)
@@ -282,7 +163,7 @@ class App(tk.Tk):
         if messagebox.askyesno("ยังไม่ได้ติดตั้ง",
                                "ไม่พบ bin\\yt-dlp.exe\n\nเปิด setup.bat เพื่อติดตั้งตอนนี้ไหม?\n"
                                "(ติดตั้งเสร็จแล้วกดดาวน์โหลดได้เลย)"):
-            os.startfile(ROOT / "setup.bat")
+            os.startfile(ytcore.ROOT / "setup.bat")
 
     def start_download(self):
         if self.worker:
@@ -291,10 +172,10 @@ class App(tk.Tk):
         if not urls:
             messagebox.showwarning("ยังไม่มีลิงก์", "กรุณาวางลิงก์ YouTube อย่างน้อย 1 ลิงก์")
             return
-        if not YTDLP.exists():
+        if not ytcore.YTDLP.exists():
             self.ask_setup()
             return
-        out_dir = Path(self.out_dir.get().strip() or DEFAULT_OUT_DIR)
+        out_dir = Path(self.out_dir.get().strip() or ytcore.DEFAULT_OUT_DIR)
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -304,19 +185,19 @@ class App(tk.Tk):
 
         mode = self.mode.get()
         self.log(f"=== {MODES[mode]} : {len(urls)} ลิงก์ -> {out_dir}", "info")
-        if not FFMPEG.exists():
-            self.log("คำเตือน: ไม่พบ ffmpeg.exe - จะได้แค่วิดีโอความละเอียดต่ำ และแปลง MP3 ไม่ได้ (รัน setup.bat)", "warn")
-        commands = [build_command(u, mode, out_dir, self.playlist.get()) for u in urls]
+        if not ytcore.FFMPEG.exists():
+            self.log(ytcore.FFMPEG_WARNING, "warn")
+        commands = [ytcore.build_command(u, mode, out_dir, self.playlist.get()) for u in urls]
         self.run_worker("download", commands, "กำลังเริ่มดาวน์โหลด...")
 
     def update_ytdlp(self):
         if self.worker:
             return
-        if not YTDLP.exists():
+        if not ytcore.YTDLP.exists():
             self.ask_setup()
             return
         self.log("=== อัปเดต yt-dlp", "info")
-        self.run_worker("update", [[str(YTDLP), "-U"]], "กำลังอัปเดต yt-dlp...")
+        self.run_worker("update", [ytcore.update_command()], "กำลังอัปเดต yt-dlp...")
 
     def cancel(self):
         if self.worker:
@@ -330,25 +211,10 @@ class App(tk.Tk):
         self.status.set(status)
         self.detail.set("")
         self.set_busy(True)
-        self.worker = Worker(commands, self.events)
+        self.worker = ytcore.Worker(commands, self.events)
         self.worker.start()
 
     # ---------- รับผลจาก yt-dlp ----------
-
-    def _reset_position(self, job=0, jobs=0):
-        self.job, self.jobs = job, jobs
-        self.item = self.items = 0
-        self.part = self.parts = 0
-
-    def position_text(self):
-        parts = []
-        if self.jobs > 1:
-            parts.append(f"ลิงก์ {self.job}/{self.jobs}")
-        if self.items > 1:
-            parts.append(f"คลิป {self.item}/{self.items}")
-        if self.parts > 1:
-            parts.append(f"ไฟล์ {self.part}/{self.parts}")
-        return " · ".join(parts)
 
     def poll_events(self):
         try:
@@ -357,7 +223,7 @@ class App(tk.Tk):
                 if event[0] == "line":
                     self.handle_line(event[1])
                 elif event[0] == "job":
-                    self._reset_position(event[1], event[2])
+                    self.tracker.reset(event[1], event[2])
                 elif event[0] == "done":
                     self.finish(event[1], event[2])
         except queue.Empty:
@@ -365,64 +231,30 @@ class App(tk.Tk):
         self.after(100, self.poll_events)
 
     def handle_line(self, line):
-        if line.startswith(PROGRESS_TAG):
-            percent, speed, eta, title = (line[len(PROGRESS_TAG):].split("|", 3) + [""] * 4)[:4]
-            m = PERCENT_RE.search(percent)
-            if m:
-                self.progress.configure(value=float(m.group(1)))
-            self.status.set(f"กำลังดาวน์โหลด: {title.strip()}")
-            eta = eta.strip()
-            info = [percent.strip(), speed.strip()]
-            if eta and eta != "NA":
-                info.append(f"เหลือ {eta}")
-            position = self.position_text()
-            self.detail.set("   ·   ".join(([position] if position else []) + info))
-            return
-
-        if m := ITEM_RE.match(line):
-            self.item, self.items = int(m.group(1)), int(m.group(2))
-        elif m := FORMATS_RE.match(line):
-            self.part, self.parts = 0, m.group(1).count("+") + 1
-        elif line.startswith("[download] Destination:"):
-            self.part += 1
-        elif line.startswith("Deleting original file"):
-            return  # ไฟล์ชั่วคราวหลังรวมภาพ+เสียง ไม่ต้องแสดง
-        else:
-            for prefix, text in STAGES.items():
-                if line.startswith(prefix):
-                    self.status.set(text)
-                    break
-
-        tag = "error" if line.startswith("ERROR") else "warn" if line.startswith("WARNING") else None
-        self.log(line, tag)
+        update = self.tracker.feed(line)
+        if update.percent is not None:
+            self.progress.configure(value=update.percent)
+        if update.status is not None:
+            self.status.set(update.status)
+        if update.detail is not None:
+            self.detail.set(update.detail)
+        if update.log is not None:
+            self.log(update.log, update.tag)
 
     def finish(self, failed, cancelled):
         self.worker = None
         self.set_busy(False)
-        if cancelled:
-            self.status.set("ยกเลิกแล้ว")
-            self.log("ยกเลิกแล้ว (ไฟล์ .part ที่ค้างอยู่จะโหลดต่อได้เมื่อดาวน์โหลดลิงก์เดิมอีกครั้ง)", "warn")
-        elif self.job_kind == "update":
-            ok = not failed
-            self.status.set("อัปเดต yt-dlp เรียบร้อย" if ok else "อัปเดต yt-dlp ไม่สำเร็จ")
-            self.log(self.status.get(), "ok" if ok else "error")
-        elif failed:
-            self.status.set(f"เสร็จแล้ว แต่มี {failed} ลิงก์ที่ดาวน์โหลดไม่สำเร็จ")
-            self.log(self.status.get() + " - ลองกด 'อัปเดต yt-dlp' แล้วลองใหม่", "error")
-        else:
+        status, message, tag = ytcore.summary(self.job_kind, failed, cancelled)
+        if tag == "ok" and self.job_kind == "download":
             self.progress.configure(value=100)
-            self.status.set("ดาวน์โหลดเสร็จแล้ว ✓")
-            self.log("ดาวน์โหลดเสร็จแล้ว", "ok")
+        self.status.set(status)
+        self.log(message, tag)
         self.bell()
 
     # ---------- ปิดโปรแกรม ----------
 
     def save_settings(self):
-        data = {"mode": self.mode.get(), "playlist": self.playlist.get(), "out_dir": self.out_dir.get().strip()}
-        try:
-            SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+        ytcore.save_settings(self.mode.get(), self.playlist.get(), self.out_dir.get())
 
     def on_close(self):
         if self.worker:
@@ -433,17 +265,8 @@ class App(tk.Tk):
         self.destroy()
 
 
-def enable_dpi_awareness():
-    """ไม่ให้ตัวหนังสือเบลอบนจอที่ตั้ง scale ไว้มากกว่า 100%"""
-    try:
-        import ctypes
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except (AttributeError, OSError):
-        pass
-
-
 def main():
-    enable_dpi_awareness()
+    ytcore.enable_dpi_awareness()
     App().mainloop()
 
 
