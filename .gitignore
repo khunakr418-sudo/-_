@@ -221,3 +221,4 @@ __marimo__/
 
 # YouTube downloader: binaries are fetched by setup.bat
 bin/
+gui_settings.json

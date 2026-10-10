@@ -19,6 +19,19 @@
 
 ## ใช้งาน
 
+### แบบหน้าต่าง (GUI) — แนะนำ
+
+ดับเบิลคลิก **`gui.bat`** (ต้องมี [Python 3](https://www.python.org/downloads/) ในเครื่อง ไม่ต้องติดตั้งแพ็กเกจเพิ่ม)
+
+1. วางลิงก์ในช่องด้านบน (1 บรรทัดต่อ 1 ลิงก์) หรือกดปุ่ม **วางลิงก์**
+2. เลือกรูปแบบ: วิดีโอคุณภาพสูงสุด / 1080p / 720p / MP3
+3. เลือกโฟลเดอร์ที่จะบันทึก แล้วกด **ดาวน์โหลด** (หรือ Ctrl+Enter)
+
+หน้าต่างจะแสดงแถบความคืบหน้า ความเร็ว และเวลาที่เหลือ กด **ยกเลิก** ได้ระหว่างโหลด
+โปรแกรมจะจำรูปแบบและโฟลเดอร์ที่เลือกไว้ใช้ครั้งต่อไป (เก็บใน `gui_settings.json`)
+
+### แบบเมนูใน console
+
 ดับเบิลคลิก **`download.bat`** แล้วเลือกเมนู:
 
 ```
@@ -67,8 +80,10 @@ download.bat -Url "https://youtu.be/xxxx" -OutDir "D:\Videos"
 
 ```
 setup.bat / setup.ps1        ดาวน์โหลด/อัปเดต yt-dlp และ ffmpeg
-download.bat / download.ps1  เมนูดาวน์โหลด
-yt-dlp.conf                  ตัวเลือกเพิ่มเติมของ yt-dlp
+gui.bat / gui.pyw            หน้าต่างดาวน์โหลด (GUI, Python tkinter)
+download.bat / download.ps1  เมนูดาวน์โหลดแบบ console
+yt-dlp.conf                  ตัวเลือกเพิ่มเติมของ yt-dlp (ใช้ทั้ง GUI และ console)
+gui_settings.json            ค่าที่ GUI จำไว้ (ไม่เก็บใน git)
 bin\                         yt-dlp.exe, ffmpeg.exe, ffprobe.exe (ไม่เก็บใน git)
 downloads\                   ไฟล์ที่ดาวน์โหลด (ไม่เก็บใน git)
 ```
